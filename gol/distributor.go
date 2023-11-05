@@ -27,9 +27,17 @@ func distributor(p Params, c distributorChannels) {
 	for i := range world {
 		world[i] = make([]uint8, p.ImageWidth)
 	}
+
 	for i := 0; i < p.ImageHeight; i++ {
 		for k := 0; k < p.ImageWidth; k++ {
 			world[i][k] = <-c.ioInput
+		}
+	}
+	for i := 0; i < p.ImageHeight; i++ {
+		for k := 0; k < p.ImageWidth; k++ {
+			if world[i][k] == 255 {
+				c.events <- CellFlipped{CompletedTurns: 0, Cell: util.Cell{X: k, Y: i}}
+			}
 		}
 	}
 
@@ -49,7 +57,15 @@ func distributor(p Params, c distributorChannels) {
 			// Single-threaded execution
 			for t := 0; t < turn; t++ {
 				newWorld = calculateNextState(0, p.ImageHeight, world)
+				for i := 0; i < p.ImageHeight; i++ {
+					for k := 0; k < p.ImageWidth; k++ {
+						if newWorld[i][k] != world[i][k] {
+							c.events <- CellFlipped{CompletedTurns: t + 1, Cell: util.Cell{X: k, Y: i}}
+						}
+					}
+				}
 				copyWhole(world, newWorld)
+
 				c.events <- TurnComplete{CompletedTurns: 1}
 			}
 		} else {
@@ -106,6 +122,13 @@ func distributor(p Params, c distributorChannels) {
 					}
 
 				}
+				for i := 0; i < p.ImageHeight; i++ {
+					for k := 0; k < p.ImageWidth; k++ {
+						if newWorld[i][k] != world[i][k] {
+							c.events <- CellFlipped{CompletedTurns: t + 1, Cell: util.Cell{X: k, Y: i}}
+						}
+					}
+				}
 				copyWhole(world, newWorld)
 				mutex.Lock()
 				completed++
@@ -130,7 +153,6 @@ func distributor(p Params, c distributorChannels) {
 	}
 	alive := calculateAliveCells(world)
 	c.events <- FinalTurnComplete{CompletedTurns: turn, Alive: alive}
-
 	// Make sure that the Io has finished any output before exiting.
 	c.ioCommand <- ioCheckIdle
 	<-c.ioIdle
