@@ -14,6 +14,7 @@ type distributorChannels struct {
 	ioFilename chan<- string
 	ioOutput   chan<- uint8
 	ioInput    <-chan uint8
+	keyP       <-chan rune
 }
 
 // distributor divides the work between workers and interacts with other goroutines.
@@ -40,7 +41,6 @@ func distributor(p Params, c distributorChannels) {
 			}
 		}
 	}
-
 	turn := p.Turns
 	if turn != 0 {
 		//new world is to store next state----------------------------------------------------------------------------------
@@ -49,10 +49,55 @@ func distributor(p Params, c distributorChannels) {
 			newWorld[i] = make([]uint8, p.ImageWidth)
 		}
 
-		//ticker send signal every 2 second to report alive cell
-		ticker := time.NewTicker(2 * time.Second)
+		ticker := time.NewTicker(2 * time.Second) //ticker send signal every 2 second to report alive cell
 
+		var mutex sync.Mutex //a lock to protect livecell and completed without race condition
+		liveCell := 0
+		completed := 0
+		pause := make(chan bool, 1)
 		copyWhole(newWorld, world)
+
+		// Goroutine to handle key presses
+		go func() {
+			for {
+				select {
+				case k := <-c.keyP:
+					switch k {
+					case 's':
+						// Save the game state
+						saveWorldState(c, p, world, fileName, completed, &mutex)
+						fmt.Println("saved the current state")
+					case 'q':
+						// Save the game state and quit
+						saveWorldState(c, p, world, fileName, completed, &mutex)
+						fmt.Println("saved the current state as final")
+						fmt.Println("final turn completed is", completed)
+						c.events <- FinalTurnComplete{CompletedTurns: completed, Alive: calculateAliveCells(world)}
+						// Make sure that the Io has finished any output before exiting.
+						c.ioCommand <- ioCheckIdle
+						<-c.ioIdle
+						c.events <- StateChange{turn, Quitting}
+						// Close the channel to stop the SDL goroutine gracefully. Removing may cause deadlock.
+						close(c.events)
+					case 'p':
+						// Pause the game
+						pause <- true // Send a pause signal (assuming pause is a channel used for this purpose)
+						saveWorldState(c, p, world, fileName, completed, &mutex)
+					loop:
+						for {
+							select {
+							case k := <-c.keyP:
+								if k == 'p' {
+									pause <- false // Send signal to resume operation
+									break loop     // Break out of the outer loop
+								}
+							}
+						}
+					}
+				}
+			}
+		}()
+
 		if p.Threads == 1 {
 			// Single-threaded execution
 			for t := 0; t < turn; t++ {
@@ -65,13 +110,9 @@ func distributor(p Params, c distributorChannels) {
 					}
 				}
 				copyWhole(world, newWorld)
-
 				c.events <- TurnComplete{CompletedTurns: 1}
 			}
 		} else {
-			var mutex sync.Mutex //a lock to protect livecell and completed without race condition
-			liveCell := 0
-			completed := 0
 			//go routine using select and infinite loop to report
 			go func() {
 				for {
@@ -122,6 +163,20 @@ func distributor(p Params, c distributorChannels) {
 					}
 
 				}
+
+				//check pause or not
+				select {
+				case t := <-pause:
+					if t {
+						for t {
+							t = <-pause
+						}
+						break
+					}
+				default:
+					break
+				}
+
 				for i := 0; i < p.ImageHeight; i++ {
 					for k := 0; k < p.ImageWidth; k++ {
 						if newWorld[i][k] != world[i][k] {
@@ -129,8 +184,8 @@ func distributor(p Params, c distributorChannels) {
 						}
 					}
 				}
-				copyWhole(world, newWorld)
 				mutex.Lock()
+				copyWhole(world, newWorld)
 				completed++
 				mutex.Unlock()
 				c.events <- TurnComplete{CompletedTurns: t + 1}
@@ -238,6 +293,21 @@ func calculateAliveCells(world [][]uint8) []util.Cell {
 	}
 	return alive
 }
+
+// Helper function to save the current state of the world
+func saveWorldState(c distributorChannels, p Params, world [][]uint8, fileName string, completed int, mutex *sync.Mutex) {
+	c.ioCommand <- ioCommand(0) // Send a command to indicate the start of an I/O operation
+	mutex.Lock()
+	c.ioFilename <- fmt.Sprintf("%s-%d", fileName, completed) // Send the filename to the I/O system
+	for i := 0; i < p.ImageHeight; i++ {
+		for k := 0; k < p.ImageWidth; k++ {
+			c.ioOutput <- world[i][k] // Send each cell's state to the I/O system
+		}
+	}
+	mutex.Unlock()
+}
+
+// Goroutine to handle key presses
 
 type Pair struct {
 	y int
