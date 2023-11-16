@@ -2,7 +2,6 @@ package gol
 
 import (
 	"fmt"
-	"sync"
 	"time"
 	"uk.ac.bris.cs/gameoflife/util"
 )
@@ -51,25 +50,25 @@ func distributor(p Params, c distributorChannels) {
 
 		ticker := time.NewTicker(2 * time.Second) //ticker send signal every 2 second to report alive cell
 
-		var mutex sync.Mutex //a lock to protect livecell and completed without race condition
-		liveCell := 0
+		//var mutex sync.Mutex //a lock to protect livecell and completed without race condition
+		liveCell := len(calculateAliveCells(world))
 		completed := 0
-		pause := make(chan bool, 1)
+		portionHeight := p.ImageHeight / p.Threads
 		copyWhole(newWorld, world)
 
-		// Goroutine to handle key presses
-		go func() {
+		for t := 0; t < turn; t++ {
+		OUTER:
 			for {
 				select {
 				case k := <-c.keyP:
 					switch k {
 					case 's':
 						// Save the game state
-						saveWorldState(c, p, world, fileName, completed, &mutex)
+						saveWorldState(c, p, world, fileName, completed)
 						fmt.Println("saved the current state")
 					case 'q':
 						// Save the game state and quit
-						saveWorldState(c, p, world, fileName, completed, &mutex)
+						saveWorldState(c, p, world, fileName, completed)
 						fmt.Println("saved the current state as final")
 						fmt.Println("final turn completed is", completed)
 						c.events <- FinalTurnComplete{CompletedTurns: completed, Alive: calculateAliveCells(world)}
@@ -81,117 +80,86 @@ func distributor(p Params, c distributorChannels) {
 						close(c.events)
 					case 'p':
 						// Pause the game
-						pause <- true // Send a pause signal (assuming pause is a channel used for this purpose)
-						saveWorldState(c, p, world, fileName, completed, &mutex)
+						saveWorldState(c, p, world, fileName, completed)
 					loop:
 						for {
 							select {
 							case k := <-c.keyP:
 								if k == 'p' {
-									pause <- false // Send signal to resume operation
-									break loop     // Break out of the outer loop
+									break loop // Break out of the loop
 								}
 							}
 						}
 					}
-				}
-			}
-		}()
 
-		if p.Threads == 1 {
-			// Single-threaded execution
-			for t := 0; t < turn; t++ {
-				newWorld = calculateNextState(0, p.ImageHeight, world)
-				for i := 0; i < p.ImageHeight; i++ {
-					for k := 0; k < p.ImageWidth; k++ {
-						if newWorld[i][k] != world[i][k] {
-							c.events <- CellFlipped{CompletedTurns: t + 1, Cell: util.Cell{X: k, Y: i}}
-						}
-					}
-				}
-				copyWhole(world, newWorld)
-				c.events <- TurnComplete{CompletedTurns: 1}
-			}
-		} else {
-			//go routine using select and infinite loop to report
-			go func() {
-				for {
-					select {
-					case <-ticker.C:
-						mutex.Lock()
-						c.events <- AliveCellsCount{CellsCount: liveCell, CompletedTurns: completed}
-						mutex.Unlock()
-					}
-				}
-			}()
+				case <-ticker.C:
+					c.events <- AliveCellsCount{CellsCount: liveCell, CompletedTurns: completed}
 
-			portionHeight := p.ImageHeight / p.Threads
-			for t := 0; t < turn; t++ {
-				mutex.Lock()
-				liveCell = len(calculateAliveCells(world))
-				mutex.Unlock()
-
-				parts := make([]chan [][]uint8, p.Threads)
-				for i := range parts {
-					parts[i] = make(chan [][]uint8, 1)
-				}
-				for i := 0; i < p.Threads; i++ {
-					go func(i int) {
-						if i == p.Threads-1 {
-							startY := i * portionHeight
-							endY := p.ImageHeight
-							parts[i] <- calculateNextState(startY, endY, world)
-						} else {
-							startY := i * portionHeight
-							endY := (i + 1) * portionHeight
-							parts[i] <- calculateNextState(startY, endY, world)
-						}
-					}(i)
-
-				}
-				for i := 0; i < p.Threads; i++ {
-					part := <-parts[i]
-					if i != p.Threads-1 {
-						for h := 0; h < portionHeight; h++ {
-							copy(newWorld[i*portionHeight+h], part[i*portionHeight+h])
-						}
-					} else {
-						for h := 0; h < p.ImageHeight-i*portionHeight; h++ {
-							copy(newWorld[i*portionHeight+h], part[i*portionHeight+h])
-
-						}
-					}
-
-				}
-
-				//check pause or not
-				select {
-				case t := <-pause:
-					if t {
-						for t {
-							t = <-pause
-						}
-						break
-					}
 				default:
-					break
-				}
-
-				for i := 0; i < p.ImageHeight; i++ {
-					for k := 0; k < p.ImageWidth; k++ {
-						if newWorld[i][k] != world[i][k] {
-							c.events <- CellFlipped{CompletedTurns: t + 1, Cell: util.Cell{X: k, Y: i}}
+					if p.Threads == 1 {
+						newWorld = calculateNextState(0, p.ImageHeight, world)
+						for i := 0; i < p.ImageHeight; i++ {
+							for k := 0; k < p.ImageWidth; k++ {
+								if newWorld[i][k] != world[i][k] {
+									c.events <- CellFlipped{CompletedTurns: t + 1, Cell: util.Cell{X: k, Y: i}}
+								}
+							}
 						}
+						copyWhole(world, newWorld)
+						c.events <- TurnComplete{CompletedTurns: t}
+						break OUTER
+					} else {
+						parts := make([]chan [][]uint8, p.Threads)
+						for i := range parts {
+							parts[i] = make(chan [][]uint8, 1)
+						}
+						for i := 0; i < p.Threads; i++ {
+							go func(i int) {
+								if i == p.Threads-1 {
+									startY := i * portionHeight
+									endY := p.ImageHeight
+									parts[i] <- calculateNextState(startY, endY, world)
+								} else {
+									startY := i * portionHeight
+									endY := (i + 1) * portionHeight
+									parts[i] <- calculateNextState(startY, endY, world)
+								}
+							}(i)
+
+						}
+						for i := 0; i < p.Threads; i++ {
+							part := <-parts[i]
+							if i != p.Threads-1 {
+								for h := 0; h < portionHeight; h++ {
+									copy(newWorld[i*portionHeight+h], part[i*portionHeight+h])
+								}
+							} else {
+								for h := 0; h < p.ImageHeight-i*portionHeight; h++ {
+									copy(newWorld[i*portionHeight+h], part[i*portionHeight+h])
+
+								}
+							}
+
+						}
+						for i := 0; i < p.ImageHeight; i++ {
+							for k := 0; k < p.ImageWidth; k++ {
+								if newWorld[i][k] != world[i][k] {
+									c.events <- CellFlipped{CompletedTurns: t + 1, Cell: util.Cell{X: k, Y: i}}
+								}
+							}
+						}
+						//mutex.Lock()
+						copyWhole(world, newWorld)
+						completed++
+						liveCell = len(calculateAliveCells(world))
+						//mutex.Unlock()
+						c.events <- TurnComplete{CompletedTurns: t + 1}
+						break OUTER
 					}
 				}
-				mutex.Lock()
-				copyWhole(world, newWorld)
-				completed++
-				mutex.Unlock()
-				c.events <- TurnComplete{CompletedTurns: t + 1}
 			}
 		}
-		defer ticker.Stop()
+
 	} else {
 		c.events <- AliveCellsCount{CellsCount: len(calculateAliveCells(world)), CompletedTurns: 0}
 		c.events <- TurnComplete{CompletedTurns: 0}
@@ -295,16 +263,14 @@ func calculateAliveCells(world [][]uint8) []util.Cell {
 }
 
 // Helper function to save the current state of the world
-func saveWorldState(c distributorChannels, p Params, world [][]uint8, fileName string, completed int, mutex *sync.Mutex) {
-	c.ioCommand <- ioCommand(0) // Send a command to indicate the start of an I/O operation
-	mutex.Lock()
+func saveWorldState(c distributorChannels, p Params, world [][]uint8, fileName string, completed int) {
+	c.ioCommand <- ioCommand(0)                               // Send a command to indicate the start of an I/O operation
 	c.ioFilename <- fmt.Sprintf("%s-%d", fileName, completed) // Send the filename to the I/O system
 	for i := 0; i < p.ImageHeight; i++ {
 		for k := 0; k < p.ImageWidth; k++ {
 			c.ioOutput <- world[i][k] // Send each cell's state to the I/O system
 		}
 	}
-	mutex.Unlock()
 }
 
 // Goroutine to handle key presses
