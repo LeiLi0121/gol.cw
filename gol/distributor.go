@@ -81,11 +81,13 @@ func distributor(p Params, c distributorChannels) {
 					case 'p':
 						// Pause the game
 						saveWorldState(c, p, world, fileName, completed)
+						c.events <- StateChange{completed, Paused}
 					loop:
 						for {
 							select {
 							case k := <-c.keyP:
 								if k == 'p' {
+									c.events <- StateChange{completed, Executing}
 									break loop // Break out of the loop
 								}
 							}
@@ -148,11 +150,9 @@ func distributor(p Params, c distributorChannels) {
 								}
 							}
 						}
-						//mutex.Lock()
 						copyWhole(world, newWorld)
 						completed++
 						liveCell = len(calculateAliveCells(world))
-						//mutex.Unlock()
 						c.events <- TurnComplete{CompletedTurns: t + 1}
 						break OUTER
 					}
@@ -271,6 +271,7 @@ func saveWorldState(c distributorChannels, p Params, world [][]uint8, fileName s
 			c.ioOutput <- world[i][k] // Send each cell's state to the I/O system
 		}
 	}
+	c.events <- ImageOutputComplete{completed, fileName}
 }
 
 // Goroutine to handle key presses
