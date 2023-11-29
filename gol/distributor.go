@@ -77,6 +77,7 @@ func distributor(p Params, c distributorChannels) {
 							case k := <-c.keyP:
 								if k == 'p' {
 									c.events <- StateChange{completed, Executing}
+									fmt.Println("Continuing")
 									break loop // Break out of the loop
 								}
 							}
